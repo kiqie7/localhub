@@ -1,17 +1,22 @@
 package com.hmdp.controller;
 
 
+import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.RandomUtil;
 import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.UserDTO;
+import com.hmdp.entity.User;
 import com.hmdp.entity.UserInfo;
 import com.hmdp.service.IUserInfoService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
-import javax.servlet.http.HttpSession;
 
 /**
  * <p>
@@ -36,9 +41,22 @@ public class UserController {
      * 发送手机验证码
      */
     @PostMapping("code")
-    public Result sendCode(@RequestParam("phone") String phone, HttpSession session) {
-        // TODO 发送短信验证码并保存验证码
-        return Result.fail("功能未完成");
+    public Result sendCode(@RequestParam("phone") String phone) {
+
+        return userService.sendCode(phone);
+        /*//1.验证手机号格式
+        if (RegexUtils.isPhoneInvalid(phone)){
+           //2.不符合返回错误信息
+            return Result.fail("手机号格式有误");
+        }
+        //3.符合，生成验证码
+        String code = RandomUtil.randomNumbers(6);
+        //4.将验证码存到session
+        session.setAttribute("code",code);
+        //5.记录验证码
+        log.debug("发送短信验证码成功，验证码：{}", code);
+        //ok*/
+
     }
 
     /**
@@ -46,10 +64,42 @@ public class UserController {
      * @param loginForm 登录参数，包含手机号、验证码；或者手机号、密码
      */
     @PostMapping("/login")
-    public Result login(@RequestBody LoginFormDTO loginForm, HttpSession session){
-        // TODO 实现登录功能
-        return Result.fail("功能未完成");
+    public Result login(@RequestBody LoginFormDTO loginForm){
+        return userService.login(loginForm);
+
+        /*
+        //1.验证手机号格式
+        String phone = loginForm.getPhone();
+        if (RegexUtils.isPhoneInvalid(phone)){
+            //2.不符合返回错误信息
+            return Result.fail("手机号格式有误");
+        }
+        //2.校验验证码
+        Object cacheCode = session.getAttribute("code");
+        String code = loginForm.getCode();
+        if (cacheCode == null || !cacheCode.toString().equals(code)){
+            return Result.fail("验证码无效或不正确");
+        }
+        //3.一致，根据手机号查用户
+        User user = userService.query().eq("phone", phone).one();
+        if (user == null){
+            user = createUserWithPhone(phone);
+        }
+        session.setAttribute("user", BeanUtil.copyProperties(user,UserDTO.class));
+        */
+
+
     }
+
+    /*private User createUserWithPhone(String phone) {
+        User user = new User();
+        user.setPhone(phone);
+        user.setNickName(SystemConstants.USER_NICK_NAME_PREFIX + RandomUtil.randomString(10));
+        if (!userService.save(user)) {
+            throw new IllegalStateException("创建用户失败");
+        }
+        return user;
+    }*/
 
     /**
      * 登出功能
