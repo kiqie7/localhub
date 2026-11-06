@@ -5,7 +5,7 @@ spring:
     name: localhub
   datasource:
     driver-class-name: com.mysql.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:13306/hmdp?useSSL=false&serverTimezone=UTC
+    url: jdbc:mysql://127.0.0.1:13306/localhub?useSSL=false&serverTimezone=UTC
     username: root
     password: 123
   redis:
