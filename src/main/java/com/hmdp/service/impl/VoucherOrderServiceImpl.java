@@ -10,13 +10,16 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.service.IVoucherService;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.Resource;
 import java.time.LocalDateTime;
 
 /**
@@ -32,6 +35,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Autowired
     private ISeckillVoucherService seckillVoucherService;
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     @Autowired
     private RedisIdWorker redisIdWorker;
@@ -49,24 +54,37 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 尚未开始
             return Result.fail("秒杀已经结束！");
         }
+        // 4.判断库存是有充足
         if (voucher.getStock()<1){
             return Result.fail("卖完了");
+        }Long userId = UserHolder.getUser().getId();
+        //创建锁对象(新增代码)
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        //获取锁对象
+        boolean isLock = lock.tryLock(1200L);
+        if (!isLock){
+            return Result.fail("不允许重复下单");
         }
-
-        Long userid = UserHolder.getUser().getId();
-        synchronized (userid.toString().intern()) {
-            IVoucherOrderService iVoucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
-            return iVoucherOrderService.creatVoucher(voucherId);
+        try {
+            synchronized (userId.toString().intern()) {
+                //获取代理对象
+                IVoucherOrderService iVoucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
+                return iVoucherOrderService.creatVoucher(voucherId);
+            }
+        } catch (IllegalStateException e) {
+            throw new RuntimeException(e);
+        } finally {
+            lock.unlock();
         }
     }
 
     @Transactional
     public Result creatVoucher(Long voucherId) {
         //一人一单判断
-        Long userid = UserHolder.getUser().getId();
+        Long userId = UserHolder.getUser().getId();
         Integer count = query()
                 .eq("voucher_id", voucherId)
-                .eq("user_id", userid)
+                .eq("user_id", userId)
                 .count();
             if (count > 0) {
                 return Result.fail("用户已购买过一次");
@@ -86,7 +104,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             long orderId = redisIdWorker.nextId("order");
             voucherOrder.setId(orderId);
             // 6.2.用户id
-            Long userId = UserHolder.getUser().getId();
             voucherOrder.setUserId(userId);
             // 6.3.代金券id
             voucherOrder.setVoucherId(voucherId);
