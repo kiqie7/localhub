@@ -8,14 +8,29 @@ import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
+import com.hmdp.utils.SystemConstants;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -62,16 +77,104 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
 
     @Override
+    @Transactional
+    public Result saveShop(Shop shop) {
+        if (shop == null || shop.getTypeId() == null || shop.getTypeId() <= 0
+                || !isValidCoordinate(shop.getX(), shop.getY())) {
+            return Result.fail("商铺类型或经纬度不正确");
+        }
+        if (!save(shop)) {
+            return Result.fail("新增商铺失败");
+        }
+        // 新增后同步索引，不需要重启应用才能出现在附近商户列表。
+        stringRedisTemplate.opsForGeo().add(SHOP_GEO_KEY + shop.getTypeId(),
+                new Point(shop.getX(), shop.getY()), shop.getId().toString());
+        return Result.ok(shop.getId());
+    }
+
+    @Override
+    @Transactional
     public Result update(Shop shop) {
+        if (shop == null) {
+            return Result.fail("商铺信息不能为空");
+        }
         Long id = shop.getId();
         if (id == null){
             return Result.fail("商铺不存在");
         }
+        Shop previous = getById(id);
+        if (previous == null) {
+            return Result.fail("商铺不存在");
+        }
+        Long typeId = shop.getTypeId() == null ? previous.getTypeId() : shop.getTypeId();
+        Double x = shop.getX() == null ? previous.getX() : shop.getX();
+        Double y = shop.getY() == null ? previous.getY() : shop.getY();
+        if (typeId == null || typeId <= 0 || !isValidCoordinate(x, y)) {
+            return Result.fail("商铺类型或经纬度不正确");
+        }
         //1.更新数据库
-        updateById(shop);
+        if (!updateById(shop)) {
+            return Result.fail("更新商铺失败");
+        }
         //2.删除缓存
         stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        //3.更新坐标；类型改变时移除旧类型中的成员。
+        stringRedisTemplate.opsForGeo().add(SHOP_GEO_KEY + typeId, new Point(x, y), id.toString());
+        if (!Objects.equals(previous.getTypeId(), typeId) && previous.getTypeId() != null) {
+            stringRedisTemplate.opsForGeo().remove(SHOP_GEO_KEY + previous.getTypeId(), id.toString());
+        }
         return Result.ok();
+    }
+
+    @Override
+    public Result queryShopByType(Integer typeId, Integer current, Double x, Double y) {
+        if (typeId == null || typeId <= 0 || current == null || current < 1) {
+            return Result.fail("商铺类型或页码不正确");
+        }
+        // 未提供完整坐标时，保持原有数据库分页行为。
+        if (x == null || y == null) {
+            Page<Shop> page = query().eq("type_id", typeId)
+                    .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
+            return Result.ok(page.getRecords());
+        }
+        if (!isValidCoordinate(x, y)) {
+            return Result.fail("经纬度不正确");
+        }
+
+        long end = (long) current * SystemConstants.DEFAULT_PAGE_SIZE;
+        long from = end - SystemConstants.DEFAULT_PAGE_SIZE;
+        // Spring Data Redis 2.3 使用 GEORADIUS，兼容现有依赖，无需升级到 GEOSEARCH。
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = stringRedisTemplate.opsForGeo().radius(
+                SHOP_GEO_KEY + typeId,
+                new Circle(new Point(x, y), new Distance(5000, RedisGeoCommands.DistanceUnit.METERS)),
+                RedisGeoCommands.GeoRadiusCommandArgs.newGeoRadiusArgs()
+                        .includeDistance().sortAscending().limit(end));
+        if (results == null || results.getContent().size() <= from) {
+            return Result.ok(Collections.emptyList());
+        }
+
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> locations = results.getContent();
+        List<Long> ids = new ArrayList<>(SystemConstants.DEFAULT_PAGE_SIZE);
+        Map<Long, Double> distances = new HashMap<>(SystemConstants.DEFAULT_PAGE_SIZE);
+        for (int index = (int) from; index < locations.size(); index++) {
+            GeoResult<RedisGeoCommands.GeoLocation<String>> location = locations.get(index);
+            Long shopId = Long.valueOf(location.getContent().getName());
+            ids.add(shopId);
+            distances.put(shopId, location.getDistance().getValue());
+        }
+        // ID 均来自 Long，FIELD 中不拼接原始请求字符串；保持 Redis 距离排序。
+        String idString = StrUtil.join(",", ids);
+        List<Shop> shops = query().eq("type_id", typeId).in("id", ids)
+                .last("ORDER BY FIELD(id," + idString + ")").list();
+        for (Shop shop : shops) {
+            shop.setDistance(distances.get(shop.getId()));
+        }
+        return Result.ok(shops);
+    }
+
+    private boolean isValidCoordinate(Double x, Double y) {
+        return x != null && y != null && Double.isFinite(x) && Double.isFinite(y)
+                && x >= -180 && x <= 180 && y >= -85.05112878 && y <= 85.05112878;
     }
 
     private void saveShop2Redis (Long id,Long expireSeconds){

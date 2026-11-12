@@ -25,7 +25,7 @@ public class UploadController {
             // 生成新文件名
             String fileName = createNewFileName(originalFilename);
             // 保存文件
-            image.transferTo(new File(SystemConstants.IMAGE_UPLOAD_DIR, fileName));
+            image.transferTo(resolveBlogImage(fileName));
             // 返回结果
             log.debug("文件上传成功，{}", fileName);
             return Result.ok(fileName);
@@ -36,12 +36,37 @@ public class UploadController {
 
     @GetMapping("/blog/delete")
     public Result deleteBlogImg(@RequestParam("name") String filename) {
-        File file = new File(SystemConstants.IMAGE_UPLOAD_DIR, filename);
-        if (file.isDirectory()) {
+        try {
+            FileUtil.del(resolveBlogImage(filename));
+            return Result.ok();
+        } catch (IllegalArgumentException e) {
             return Result.fail("错误的文件名称");
+        } catch (IOException e) {
+            throw new RuntimeException("文件删除失败", e);
         }
-        FileUtil.del(file);
-        return Result.ok();
+    }
+
+    private File resolveBlogImage(String filename) throws IOException {
+        if (StrUtil.isBlank(filename)) {
+            throw new IllegalArgumentException("文件名称不能为空");
+        }
+        String relativeName = filename.replace('\\', '/');
+        // 前端展示路径带 /imgs，上传接口返回的原始路径不带，两种都支持。
+        if (relativeName.startsWith("/imgs/")) {
+            relativeName = relativeName.substring("/imgs/".length());
+        } else if (relativeName.startsWith("imgs/")) {
+            relativeName = relativeName.substring("imgs/".length());
+        }
+        while (relativeName.startsWith("/")) {
+            relativeName = relativeName.substring(1);
+        }
+        File root = new File(SystemConstants.IMAGE_UPLOAD_DIR).getCanonicalFile();
+        File blogDir = new File(root, "blogs").getCanonicalFile();
+        File file = new File(root, relativeName).getCanonicalFile();
+        if (!file.toPath().startsWith(blogDir.toPath()) || file.equals(blogDir) || file.isDirectory()) {
+            throw new IllegalArgumentException("文件必须位于博客图片目录内");
+        }
+        return file;
     }
 
     private String createNewFileName(String originalFilename) {
@@ -53,7 +78,7 @@ public class UploadController {
         int d1 = hash & 0xF;
         int d2 = (hash >> 4) & 0xF;
         // 判断目录是否存在
-        File dir = new File(SystemConstants.IMAGE_UPLOAD_DIR, StrUtil.format("/blogs/{}/{}", d1, d2));
+        File dir = new File(SystemConstants.IMAGE_UPLOAD_DIR, StrUtil.format("blogs/{}/{}", d1, d2));
         if (!dir.exists()) {
             dir.mkdirs();
         }

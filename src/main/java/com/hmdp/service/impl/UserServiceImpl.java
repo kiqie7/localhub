@@ -4,6 +4,7 @@ import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.RandomUtil;
+import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
@@ -12,12 +13,17 @@ import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -25,6 +31,8 @@ import static com.hmdp.utils.RedisConstants.LOGIN_CODE_KEY;
 import static com.hmdp.utils.RedisConstants.LOGIN_CODE_TTL;
 import static com.hmdp.utils.RedisConstants.LOGIN_USER_KEY;
 import static com.hmdp.utils.RedisConstants.LOGIN_USER_TTL;
+import static com.hmdp.utils.RedisConstants.USER_SIGN_KEY;
+import static com.hmdp.utils.SystemConstants.BUSINESS_ZONE;
 import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 
 /**
@@ -97,6 +105,68 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
         stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
         return Result.ok(token);
+    }
+
+    @Override
+    public Result logout(String token) {
+        if (StrUtil.isNotBlank(token)) {
+            stringRedisTemplate.delete(LOGIN_USER_KEY + token);
+        }
+        UserHolder.removeUser();
+        return Result.ok();
+    }
+
+    @Override
+    public Result queryUserById(Long id) {
+        if (id == null || id <= 0) {
+            return Result.fail("用户不存在");
+        }
+        User user = getById(id);
+        if (user == null) {
+            return Result.fail("用户不存在");
+        }
+        return Result.ok(BeanUtil.copyProperties(user, UserDTO.class));
+    }
+
+    @Override
+    public Result sign() {
+        UserDTO user = UserHolder.getUser();
+        if (user == null) {
+            return Result.fail("请先登录");
+        }
+        LocalDate today = LocalDate.now(BUSINESS_ZONE);
+        String key = USER_SIGN_KEY + user.getId()
+                + today.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        // 每月第一天对应 offset=0，重复签到仍设置为 1。
+        stringRedisTemplate.opsForValue().setBit(key, today.getDayOfMonth() - 1, true);
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        UserDTO user = UserHolder.getUser();
+        if (user == null) {
+            return Result.fail("请先登录");
+        }
+        LocalDate today = LocalDate.now(BUSINESS_ZONE);
+        String key = USER_SIGN_KEY + user.getId()
+                + today.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        List<Long> records = stringRedisTemplate.opsForValue().bitField(
+                key,
+                BitFieldSubCommands.create()
+                        .get(BitFieldSubCommands.BitFieldType.unsigned(today.getDayOfMonth()))
+                        .valueAt(0));
+        if (records == null || records.isEmpty() || records.get(0) == null) {
+            return Result.ok(0);
+        }
+        long bits = records.get(0);
+        int count = 0;
+        // 最低位是今天；今天没签到就返回 0，不跨月累计。
+        while ((bits & 1L) == 1L) {
+            count++;
+            bits >>>= 1;
+        }
+        return Result.ok(count);
     }
 
     private User createUserWithPhone(String phone) {
